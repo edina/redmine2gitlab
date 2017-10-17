@@ -1,0 +1,16 @@
+{
+  "name": "redmine2gitlab",
+  "version": "1.0.0",
+  "description": "Script to migrate Remine Project to a GitLab one, including issues, milestones etc.",
+  "main": "index.js",
+  "repository": "git@github.com:marksmall/redmine2gitlab.git",
+  "author": "Mark Small <m.small@ed.ac.uk>",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^0.16.2",
+    "log4js": "^2.3.3"
+  },
+  "scripts": {
+    "start": "node index.js >migration.log 2>&1"
+  }
+}
