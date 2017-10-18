@@ -1,6 +1,8 @@
 'use strict';
 
 const axios = require('axios');
+const fs = require('fs');
+const FormData = require('form-data');
 const log4js = require('log4js');
 const logger = log4js.getLogger();
 logger.level = 'trace';
@@ -62,7 +64,7 @@ scheduleRequests(gitlabService, 1000);
 
 const closeIssue = (state, id, iid) => {
   // Set state of closed issues.
-  if (state === 'Closed') {
+  if (state === 'Closed' || state === 'Rejected') {
     const closeIssueParams = {
       state_event: 'close'
     };
@@ -97,75 +99,31 @@ const addNote = (id, iid, journal) => {
 };
 
 const getUserId = (issue) => {
-  let userId = undefined;
   if (issue.assigned_to) {
-    gitlabUsers.forEach(user => {
-      logger.debug('User: ', user, ', issue user: ', issue.assigned_to.name);
-      if (user.name === issue.assigned_to.name) {
-        logger.debug('User ID: ', user.id);
-        userId = user.id;
+    for (let i = 0; i < gitlabUsers.length; i++) {
+      logger.debug('User: ', gitlabUsers[i].name, ', issue user: ', issue.assigned_to.name);
+      if (gitlabUsers[i].name === issue.assigned_to.name) {
+        logger.debug('User ID: ', gitlabUsers[i].id);
+        return gitlabUsers[i].id;
       }
-    });
+    }
   }
-
-  return userId;
 };
 
 const getMilestoneId = (issue) => {
-  let milestoneId = undefined;
-  logger.debug('Get Milestone ID: ', issue);
   if (issue.fixed_version) {
-    gitlabMilestones.forEach(milestone => {
-      logger.debug('Milestone: ', milestone.title, ', issue Milestone: ', issue.fixed_version.name);
-      if (milestone.title === issue.fixed_version.name) {
-        logger.debug('Milestone ID: ', milestone.id);
-        milestoneId = milestone.id;
+    for (let i = 0; i < gitlabMilestones.length; i++) {
+      logger.debug('Milestone: ', gitlabMilestones[i].title, ', issue Milestone: ', issue.fixed_version.name);
+      if (gitlabMilestones[i].title === issue.fixed_version.name) {
+        logger.debug('Milestone ID: ', gitlabMilestones[i].id);
+        return gitlabMilestones[i].id;
       }
-    });
+    }
   }
-
-  return milestoneId;
 };
 
-// const addAttachment = (id, attachment) => {
-//   const attachmentParams = {
-//     file: ''
-//   };
-
-//   gitlabService.post(`/api/v4/projects/${id}/uploads`, 
-//                      attachmentParams, 
-//                      gitlabConfig)
-//     .then(response => {
-//     })
-//     .catch(err => {
-//       logger.error('Error adding attachment: ', err);
-//     })
-// };
-
-// const attachments = () => {
-
-// };
-
-// const createAttachments = (project) => {
-//   redmineService.get(`/projects/${project.name}/versions.json`, redmineConfig)
-//     .then(res => {
-//       const versions = res.data.versions;
-//       logger.debug('Versions: ', versions);
-
-//       if (versions.length > 0) {
-//         versions.forEach(version => {
-//           createMilestone(project.id, version);
-//         });
-//       } else {
-//         createIssue(project.id, issueData, users);
-//       }
-//     })
-//     .catch(e => {
-//       logger.error(`Error getting milestone data for ${project.name}: `, e);
-//     });
-// };
-
 const createIssue = (id, issue) => {
+  logger.debug('Issue: ', issue);
   const issueParams = {
     id: id,
     title: issue.subject,
@@ -217,7 +175,76 @@ const createIssue = (id, issue) => {
     });
 };
 
+const uploadAttachment = (project, attachment) => {
+  logger.debug(' File location: ', __dirname + '/' + attachment.filename);
+  const uploadParams = new FormData();
+  uploadParams.append('id', project.id);
+  // uploadParams.append('file', __dirname + '/README.md');
+  // uploadParams.append('')
+  uploadParams.append('file', fs.createReadStream(__dirname + '/' + attachment.filename));
+  uploadParams.append('PRIVATE-TOKEN', CONFIG.gitlab.key);
+  uploadParams.submit({
+    host: 'gitlab-tmp.edina.ac.uk',
+    path: `/api/v4/projects/${project.id}/uploads`,
+    headers: { 'PRIVATE-TOKEN': CONFIG.gitlab.key }
+  }, function(err, res) {
+    // logger.error('ERROR: ', err);
+    logger.info('STATUS CODE: ', res.statusCode);
+    logger.info('BODY: ', res.body);
+    logger.info('BODY: ', res.data);
+    let data = '';
+    res.on('data', function (chunk) {
+      data += chunk;
+    });
+    res.on('end', function () {
+      logger.info('CHUNKED DATA: ', data);
+      // var result = JSON.parse(data.join(''));
+      // logger.info('Successfully uploaded file: ', res);
+      // return result;
+    });
+
+    // logger.info('Attachment Data: ', attachmentData);
+  });
+  // const uploadParams = {
+  //   id: project.id,
+  //   file: '' + __dirname + '/README.md'
+  //   // file: '' + __dirname + '/' + attachment.filename
+  // };
+
+  logger.debug('Upload PARAMS: ', uploadParams);
+  gitlabConfig.headers['Content-Type'] = 'multipart/form-data';
+  
+  // gitlabService.defaults.headers.post['Content-Type'] = 'application/x-www-form-urlencoded';
+
+  // gitlabService.post(`/api/v4/projects/${project.id}/uploads`,
+  //                    uploadParams,
+  //                    gitlabConfig)
+  //   .then(response => {
+  //     logger.info('Successfully uploaded attachment: ', response.data);
+  //   })
+  //   .catch(err => {
+  //     logger.error('Error uploading attachment: ', err);
+  //   });
+};
+
+const createAttachments = (project, attachments) => {
+  attachments.forEach(attachment => {
+    // GET request for remote image
+    axios({
+      method: 'get',
+      url: attachment.content_url,
+      responseType: 'stream',
+      headers: { 'X-Redmine-API-Key': CONFIG.redmine.key }
+    })
+      .then(response => {
+        response.data.pipe(fs.createWriteStream(attachment.filename));
+        uploadAttachment(project, attachment);
+      });
+  });
+};
+
 const createIssues = (project) => {
+  logger.info('Creating issues for project: ', project);
   // Create issues in GitLab.
   redmineIssues.forEach(issue => {
     // Get info for each issue.
@@ -226,6 +253,10 @@ const createIssues = (project) => {
         const issue = res.data.issue;
         logger.debug('Issue Content: ', issue);
 
+        const attachments = issue.attachments;
+        // if (attachments.length > 0) {
+        //   // createAttachments(project, attachments);
+        // }
         createIssue(project.id, issue);
       })
       .catch(e => {
@@ -234,21 +265,45 @@ const createIssues = (project) => {
   });
 };
 
+const closeMilestone = (project, milestone) => {
+  logger.debug('PROJECT: ', project, ', MILESTONE: ', milestone);
+  const milestoneParams = {
+    id: project.id,
+    milestone_id: milestone.id,
+    state_event: 'close'
+  };
+
+  gitlabService.put(`/api/v4/projects/${project.id}/milestones/${milestone.id}`,
+    milestoneParams,
+    gitlabConfig)
+    .then(response => {
+      logger.info(`Successfully closed milestone: ${milestone.title}`);
+    })
+    .catch(error => {
+      logger.error('Error closing milestone: ', err)
+    })
+};
+
 const createMilestone = (project, version) => {
+  logger.info(`Project: ${project.name} - Milestone ${version}`);
   const milestoneParams = {
     id: project.id,
     title: version.name,
     description: version.description,
     due_date: version.due_date
   };
+
   gitlabService.post(`/api/v4/projects/${project.id}/milestones`, 
                     milestoneParams, 
                     gitlabConfig)
     .then(response => {
-      logger.info('Successfully created milestone: ', response.data);
+      const milestone = response.data;
+      logger.info('Successfully created milestone: ', milestone);
+      logger.info('milestone : ', response.data);
       gitlabMilestones.push(response.data);
-
-      createIssues(project);
+      if (version.status === 'closed') {
+        closeMilestone(project, milestone);
+      }
     })
     .catch(err => {
       logger.error('Error creating Milestone: ', err);
@@ -256,9 +311,10 @@ const createMilestone = (project, version) => {
 };
 
 const createMilestones = (project) => {
+  const projectName = CONFIG.redmine.project.substr(CONFIG.redmine.project.lastIndexOf('/') + 1);
   // logger.debug('Project Milestones: ', project);
-  // logger.debug(`/projects/${project.name}/versions.json`);
-  redmineService.get(`/projects/${project.name}/versions.json`, redmineConfig)
+  logger.debug(`/projects/${project.name}/versions.json`);
+  redmineService.get(`/projects/${projectName}/versions.json`, redmineConfig)
     .then(res => {
       const versions = res.data.versions;
       // logger.debug('Versions: ', versions);
@@ -267,8 +323,6 @@ const createMilestones = (project) => {
         versions.forEach(version => {
           createMilestone(project, version);
         });
-      } else {
-        createIssues();
       }
     })
     .catch(e => {
@@ -278,15 +332,20 @@ const createMilestones = (project) => {
 
 const getProject = () => {
   const projectName = CONFIG.gitlab.project.substr(CONFIG.gitlab.project.lastIndexOf('/') + 1);
-  //  logger.debug(`PROJECT: ${project}`);
+   logger.debug(`PROJECT: ${projectName}`);
   gitlabService.get(`/api/v4/projects?search=${projectName}&simple=true`,
       gitlabConfig)
     .then(response => {
       const projects = response.data;
+      // logger.debug('Retreived GitLab Projects: ', projects);
 
       projects.forEach(proj => {
+        logger.debug('Project: ', proj.path_with_namespace, ', Config Project: ', CONFIG.gitlab.project);
         if (proj.path_with_namespace === CONFIG.gitlab.project) {
+          logger.debug('Creating Milestones for project: ', proj);
           createMilestones(proj);
+          logger.debug('Creating Issues for project: ', proj);
+          createIssues(proj);
         }
       }, this);
     })
@@ -295,14 +354,66 @@ const getProject = () => {
     });
 };
 
+const getIssues = (page) => {
+  logger.debug(`URL: ${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`);
+  return redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig);
+    // .then(res => {
+    //   // logger.debug('RES: ', res);
+    //   const issues = res.data.issues;
+    //   logger.debug('PAGED ISSUES: ', issues.length);
+    //   redmineIssues = redmineIssues.concat(res.data.issues);
+    // })
+    // .catch(err => {
+    //   logger.error('Error getting Issues: ', err);
+    // });
+};
+
 const migrate = () => {
   gitlabService.get(`/api/v4/users`, gitlabConfig)
     .then(response => {
       gitlabUsers = response.data;
-      redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*`, redmineConfig)
+
+      // getIssues();
+      // getProject();
+      let page = 1;
+      redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig)
         .then(res => {
+          // TODO: WE KNOW NOW HOW MANY ISSUES, REPEAT, CALL getIssues function
+          // concurrently e.g. axios.all([getIssues(1), getIssues(2), getIssues(3)...]).then(axios.spread(() => {...}));
           redmineIssues = res.data.issues;
-          getProject();
+          const total = res.data.total_count
+          const pages = Math.ceil(total / 100);
+          logger.debug(`TOTAL PAGES: ${pages}`);
+          // getIssues(pages);
+
+          // for (let i = 1; i <= pages; i++) {
+          //  getIssues(i);
+          // };
+
+
+          const pagedRequests =[];
+          for (let i = 1; i <= pages; i++) {
+           pagedRequests.push(getIssues(i));
+          };
+
+          // axios.all([getIssues(1), getIssues(2)])
+          axios.all([...pagedRequests])
+          .then(axios.spread((...pages) => {
+            for (let i = 0; i < pages.length; i++) {
+              // logger.debug('Paged issue count: ', page1.data.issues.length);
+              // logger.debug('Paged issue count: ', page2.data.issues.length);
+              // redmineIssues = [...page1.data.issues];
+              redmineIssues = [...redmineIssues, ...pages[i].data.issues];
+              logger.debug('Retreived redmine Issues: ', redmineIssues.length);
+            }
+
+            getProject();
+          }))
+          .catch(error => {
+            logger.error(`Error getting all Paged issues for ${CONFIG.redmine.project}: `, error);
+          });
+          // logger.debug('Retreived redmine Issues: ', redmineIssues.length);
+          // getProject();
         })
         .catch(err => {
           logger.error(`Error getting issues for ${CONFIG.redmine.project}: `, err);
@@ -313,4 +424,54 @@ const migrate = () => {
     });
 };
 
-migrate();
+const deleteIssues = (project) => {
+  gitlabService.get(`/api/v4/projects/${project.id}/issues?per_page=100`, gitlabConfig)
+    .then(response => {
+      const issues = response.data;
+      issues.forEach(issue => {
+        gitlabService.delete(`/api/v4/projects/${project.id}/issues/${issue.iid}`, gitlabConfig)
+          .then(response => {
+            logger.info(`Successfully deleted issue: ${issue.iid}`);
+          })
+          .catch(err => {
+            logger.error('Error deleting issue for project: ', issue, 'ERROR: ', err);
+          });
+      });
+    })
+    .catch(err => {
+      logger.error('Error getting issues for project: ', project,'ERROR: ', err);
+    });
+};
+
+const deleteAllIssues = () => {
+  const projectName = CONFIG.gitlab.project.substr(CONFIG.gitlab.project.lastIndexOf('/') + 1);
+  logger.debug(`PROJECT: ${projectName}`);
+  gitlabService.get(`/api/v4/projects?search=${projectName}&simple=true`,
+    gitlabConfig)
+    .then(response => {
+      const projects = response.data;
+      // logger.debug('Retreived GitLab Projects: ', projects);
+
+      projects.forEach(project => {
+        logger.debug('Project: ', project.path_with_namespace, ', Config Project: ', CONFIG.gitlab.project);
+        if (project.path_with_namespace === CONFIG.gitlab.project) {
+          logger.debug('Deleting Issues for project: ', project);
+          deleteIssues(project);
+        }
+      }, this);
+    })
+    .catch(err => {
+      logger.error(`Error getting associated Projects for: ${CONFIG.redmine.project}: `, err);
+    });
+};
+
+switch (process.argv[2]) {
+  case 'migrate':
+    migrate();
+    break;
+  case 'delete':
+    deleteAllIssues();
+    break;
+  default:
+    logger.error(`Sorry, ${process.argv[2]} is not known, use 'migrate', or 'delete'`)
+}
