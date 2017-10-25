@@ -3,6 +3,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const FormData = require('form-data');
+const concat = require('concat-stream');
 const log4js = require('log4js');
 const logger = log4js.getLogger();
 logger.level = 'trace';
@@ -17,7 +18,6 @@ const CONFIG = {
     base: 'HOSTNAME',
     project: 'PROJECT',
     key: 'KEY'
-  }
 };
 
 const redmineConfig = {
@@ -33,8 +33,14 @@ const gitlabConfig = {
 let redmineIssues = [];
 let gitlabUsers = [];
 let gitlabMilestones = [];
-// let gitlabAttachments = [];
+let gitlabAttachments = [];
 
+/**
+ * Throttle XMLHTTRequests on an axios instance by the
+ * supplied interval.
+ * I found requests where failing, this seemed to fix the problem
+ * but more likely just masks the real problem.
+ */
 const scheduleRequests = (axiosInstance, intervalMs) => {
   let lastInvocationTime = undefined;
 
@@ -58,10 +64,23 @@ const scheduleRequests = (axiosInstance, intervalMs) => {
   axiosInstance.interceptors.request.use(scheduler);
 };
 
+/**
+ * Due to ERCONNRESET errors I've had to throttle many requests, this
+ * sets up axios instances to be throttled.
+ */
 const redmineService = axios.create({ baseURL: CONFIG.redmine.base });
 const gitlabService = axios.create({ baseURL: CONFIG.gitlab.base });
+scheduleRequests(redmineService, 1000);
 scheduleRequests(gitlabService, 1000);
 
+/**
+ * Close a specific GitLab Issue, if it's Redmine counterpart is 
+ * 'closed' or 'Rejected'.
+ * 
+ * @param state The state of the redmine issue.
+ * @param id The id of the GitLab Project, the issue belongs to.
+ * @param iid The id of the GitLab Issue to close.
+ */
 const closeIssue = (state, id, iid) => {
   // Set state of closed issues.
   if (state === 'Closed' || state === 'Rejected') {
@@ -80,6 +99,13 @@ const closeIssue = (state, id, iid) => {
   }
 };
 
+/**
+ * Add a note to a specific GitLab Issue.
+ * 
+ * @param id The id of the GitLab Project, the issue belongs to.
+ * @param iid The id of the GitLab Issue to close.
+ * @param journal The Redmine note text to be added.
+ */
 const addNote = (id, iid, journal) => {
   const updateIssueParams = {
     body: journal.notes,
@@ -98,30 +124,66 @@ const addNote = (id, iid, journal) => {
 
 };
 
+/**
+ * Get the GitLab User ID, if the Redmine Issue is assigned.
+ * 
+ * @param issue The Redmine Issue details.
+ */
 const getUserId = (issue) => {
   if (issue.assigned_to) {
     for (let i = 0; i < gitlabUsers.length; i++) {
-      logger.debug('User: ', gitlabUsers[i].name, ', issue user: ', issue.assigned_to.name);
       if (gitlabUsers[i].name === issue.assigned_to.name) {
-        logger.debug('User ID: ', gitlabUsers[i].id);
         return gitlabUsers[i].id;
       }
     }
   }
 };
 
+/**
+ * Get the GitLab Milestone ID, if the Redmine Issue is assigned to one.
+ * 
+ * @param issue The Redmine Issue details.
+ */
 const getMilestoneId = (issue) => {
   if (issue.fixed_version) {
     for (let i = 0; i < gitlabMilestones.length; i++) {
-      logger.debug('Milestone: ', gitlabMilestones[i].title, ', issue Milestone: ', issue.fixed_version.name);
+      //logger.debug('Milestone: ', gitlabMilestones[i].title, ', issue Milestone: ', issue.fixed_version.name);
       if (gitlabMilestones[i].title === issue.fixed_version.name) {
-        logger.debug('Milestone ID: ', gitlabMilestones[i].id);
         return gitlabMilestones[i].id;
       }
     }
   }
 };
 
+/**
+ * Add a reference to a file attachment to the issue.
+ * 
+ * @param id The id of the GitLab Project, the issue belongs to.
+ * @param iid The id of the GitLab Issue to close.
+ * @param attachment The Redmine Issue attachement details. 
+ */
+const addAttachment = (id, iid, attachment) => {
+  const attachmentParams = {
+    body: `Added File ${attachment.fileData.markdown}`
+  };
+
+  gitlabService.post(`/api/v4/projects/${id}/issues/${iid}/notes`,
+                     attachmentParams, 
+                     gitlabConfig)
+    .then(response => {
+      logger.info(`Successfully added file to issue: ${iid}`);
+    })
+    .catch(err => {
+      logger.error(`Error adding file to issue ${iid}: `, err);
+    });  
+};
+
+/**
+ * Create a GitLab Issue.
+ * 
+ * @param id The id of the GitLab Project, the issue belongs to.
+ * @param issue: The Redmine Issue details.
+ */
 const createIssue = (id, issue) => {
   logger.debug('Issue: ', issue);
   const issueParams = {
@@ -132,17 +194,15 @@ const createIssue = (id, issue) => {
   };
 
   const userId = getUserId(issue);
-  logger.debug(`Returned User ID:, ${userId}`);
   if (userId) {
+    logger.debug(`Assigning User ID: ${userId}`);
     issueParams['assignee_ids'] = [userId];
-    logger.debug(`Added User ID:, ${userId}`);
   }
 
   const milestoneId = getMilestoneId(issue);
-  logger.debug(`Returned Milestone ID:, ${milestoneId}`);
   if (milestoneId) {
+    logger.debug(`Assigning Milestone ID: ${milestoneId}`);
     issueParams['milestone_id'] = milestoneId;
-    logger.debug(`Added Milestone ID:, ${milestoneId}`);
   }
 
   logger.debug('Issue Params: ', issueParams);
@@ -153,19 +213,26 @@ const createIssue = (id, issue) => {
       const journals = issue.journals;
       const attachments = issue.attachments;
 
+      // Add notes to issue.
       journals.forEach(journal => {
         if (journal.notes && journal.notes.length > 0) {
-          // Add a note to the issue.
           addNote(id, createIssueResponse.iid, journal);
         }
       });
 
-      // attachments.forEach(attachment => {
-      //   // Attach a file to the issue.
-      //   addAttachment(id, attachment);
-      // });
+      // Add attachements to issue.
+      attachments.forEach(attachment => {
+        // Attach a file to the issue.
+        // Get corresponding attachment data.
+        for (let i = 0; i < gitlabAttachments.length; i++) {
+          if (attachment.id === gitlabAttachments[i].id) {
+            addAttachment(id, createIssueResponse.iid, gitlabAttachments[i]);
+            break;
+          }
+        }
+      });
 
-      // Set issue state to closed if that is it's state.
+      // Close issue, if 'closed' or 'rejected'.
       closeIssue(issue.status.name, id, createIssueResponse.iid);
     })
     .catch(err => {
@@ -175,61 +242,49 @@ const createIssue = (id, issue) => {
     });
 };
 
+/**
+ * Upload a file attachement to a Project.
+ * 
+ * @param project The project to upload the file to.
+ * @param attachement Redmine Issue attachment details.
+ */
 const uploadAttachment = (project, attachment) => {
-  logger.debug(' File location: ', __dirname + '/' + attachment.filename);
-  const uploadParams = new FormData();
-  uploadParams.append('id', project.id);
-  // uploadParams.append('file', __dirname + '/README.md');
-  // uploadParams.append('')
-  uploadParams.append('file', fs.createReadStream(__dirname + '/' + attachment.filename));
-  uploadParams.append('PRIVATE-TOKEN', CONFIG.gitlab.key);
-  uploadParams.submit({
-    host: 'gitlab-tmp.edina.ac.uk',
-    path: `/api/v4/projects/${project.id}/uploads`,
-    headers: { 'PRIVATE-TOKEN': CONFIG.gitlab.key }
-  }, function(err, res) {
-    // logger.error('ERROR: ', err);
-    logger.info('STATUS CODE: ', res.statusCode);
-    logger.info('BODY: ', res.body);
-    logger.info('BODY: ', res.data);
-    let data = '';
-    res.on('data', function (chunk) {
-      data += chunk;
+  const stream = fs.createReadStream(__dirname + '/' + attachment.filename);
+  const fd = new FormData();
+  fd.append("id", project.id);
+  fd.append("file", stream);
+  fd.pipe(concat({encoding: 'buffer'}, data => {
+    const headers = fd.getHeaders();
+    headers['PRIVATE-TOKEN'] = CONFIG.gitlab.key;
+    // logger.debug('HEADERS: ', headers);
+    axios.post(`https://gitlab-tmp.edina.ac.uk/api/v4/projects/${project.id}/uploads`, data, {
+      headers: headers
+    })
+    .then(response => {
+      const fileData = response.data;
+      logger.info('Successfully uploaded file: ', fileData);
+      gitlabAttachments.push({
+        id: attachment.id,
+        fileData: fileData
+      });
+    })
+    .catch(err => {
+      logger.error('Error uploading file: ', err);
     });
-    res.on('end', function () {
-      logger.info('CHUNKED DATA: ', data);
-      // var result = JSON.parse(data.join(''));
-      // logger.info('Successfully uploaded file: ', res);
-      // return result;
-    });
+  }));
 
-    // logger.info('Attachment Data: ', attachmentData);
-  });
-  // const uploadParams = {
-  //   id: project.id,
-  //   file: '' + __dirname + '/README.md'
-  //   // file: '' + __dirname + '/' + attachment.filename
-  // };
-
-  logger.debug('Upload PARAMS: ', uploadParams);
-  gitlabConfig.headers['Content-Type'] = 'multipart/form-data';
-  
-  // gitlabService.defaults.headers.post['Content-Type'] = 'application/x-www-form-urlencoded';
-
-  // gitlabService.post(`/api/v4/projects/${project.id}/uploads`,
-  //                    uploadParams,
-  //                    gitlabConfig)
-  //   .then(response => {
-  //     logger.info('Successfully uploaded attachment: ', response.data);
-  //   })
-  //   .catch(err => {
-  //     logger.error('Error uploading attachment: ', err);
-  //   });
 };
 
+/**
+ * Create GitLab Project attachments.
+ * 
+ * @param project The project to upload file attachments to.
+ * @param attachement Redmine Issue attachments.
+ */
 const createAttachments = (project, attachments) => {
   attachments.forEach(attachment => {
     // GET request for remote image
+    // NOTE: This cannot use the throttled instance, that causes ERRCONNRESET errors.
     axios({
       method: 'get',
       url: attachment.content_url,
@@ -237,36 +292,48 @@ const createAttachments = (project, attachments) => {
       headers: { 'X-Redmine-API-Key': CONFIG.redmine.key }
     })
       .then(response => {
+        // Write file to filesystem.
         response.data.pipe(fs.createWriteStream(attachment.filename));
         uploadAttachment(project, attachment);
+      })
+      .catch(err => {
+        logger.error('Error creating attachment: ', err);
       });
   });
 };
 
+/**
+ * Create GitLab Project Issues.
+ * 
+ * @param project The project to create issues for.
+ */
 const createIssues = (project) => {
-  logger.info('Creating issues for project: ', project);
   // Create issues in GitLab.
   redmineIssues.forEach(issue => {
-    // Get info for each issue.
+    // Get info for each issue, including notes and attachments.
     redmineService.get(`/issues/${issue.id}.json?include=journals,attachments`, redmineConfig)
-      .then(res => {
-        const issue = res.data.issue;
-        logger.debug('Issue Content: ', issue);
+      .then(response => {
+        const issue = response.data.issue;
 
         const attachments = issue.attachments;
-        // if (attachments.length > 0) {
-        //   // createAttachments(project, attachments);
-        // }
+        if (attachments.length > 0) {
+          createAttachments(project, attachments);
+        }
         createIssue(project.id, issue);
       })
-      .catch(e => {
-        logger.error('Error getting issue data for: ', e);
+      .catch(err => {
+        logger.error('Error getting issue data for: ', err);
       });
   });
 };
 
+/**
+ * Close a GitLab Project Milestone.
+ * 
+ * @param project The project the milestone belongs to.
+ * @param milestone The milestone to close.
+ */
 const closeMilestone = (project, milestone) => {
-  logger.debug('PROJECT: ', project, ', MILESTONE: ', milestone);
   const milestoneParams = {
     id: project.id,
     milestone_id: milestone.id,
@@ -279,13 +346,19 @@ const closeMilestone = (project, milestone) => {
     .then(response => {
       logger.info(`Successfully closed milestone: ${milestone.title}`);
     })
-    .catch(error => {
-      logger.error('Error closing milestone: ', err)
+    .catch(err => {
+      logger.error('Error closing milestone: ', err);
     })
 };
 
+/**
+ * Create a Gitlab Project Milestone.
+ * 
+ * @param project The project the milestone belongs to.
+ * @param version The Redmine 'Targeted Version' details.
+ */
 const createMilestone = (project, version) => {
-  logger.info(`Project: ${project.name} - Milestone ${version}`);
+  logger.debug(`Project: ${project.name} - Milestone ${version.name}`);
   const milestoneParams = {
     id: project.id,
     title: version.name,
@@ -293,59 +366,111 @@ const createMilestone = (project, version) => {
     due_date: version.due_date
   };
 
-  gitlabService.post(`/api/v4/projects/${project.id}/milestones`, 
+  return gitlabService.post(`/api/v4/projects/${project.id}/milestones`, 
                     milestoneParams, 
-                    gitlabConfig)
-    .then(response => {
-      const milestone = response.data;
-      logger.info('Successfully created milestone: ', milestone);
-      logger.info('milestone : ', response.data);
-      gitlabMilestones.push(response.data);
-      if (version.status === 'closed') {
-        closeMilestone(project, milestone);
-      }
-    })
-    .catch(err => {
-      logger.error('Error creating Milestone: ', err);
-    });
+                    gitlabConfig);
+    // .then(response => {
+    //   const milestone = response.data;
+    //   logger.info('Successfully created milestone: ', milestone);
+    //   // logger.info('milestone : ', response.data);
+    //   // gitlabMilestones.push(response.data);
+    //   // if (version.status === 'closed') {
+    //   //   closeMilestone(project, milestone);
+    //   // }
+    // })
+    // .catch(err => {
+    //   logger.error('Error creating Milestone: ', err);
+    // });
 };
 
+/**
+ * Get the GitLab Project Milestone associated with the Redmine 'Targeted Version'.
+ * 
+ * @param version The Redmine 'Targeted Version' details.
+ */
+const getMilestone = (version) => {
+  for (let i = 0; i < gitlabMilestones.length; i++) {
+    if (version.name === gitlabMilestones[i].title) {
+      return gitlabMilestones[i];
+    }
+  }
+};
+
+/**
+ * Create Gitlab Milestones.
+ * 
+ * @param project The project the milestone belongs to.
+ */
 const createMilestones = (project) => {
   const projectName = CONFIG.redmine.project.substr(CONFIG.redmine.project.lastIndexOf('/') + 1);
-  // logger.debug('Project Milestones: ', project);
-  logger.debug(`/projects/${project.name}/versions.json`);
   redmineService.get(`/projects/${projectName}/versions.json`, redmineConfig)
-    .then(res => {
-      const versions = res.data.versions;
-      // logger.debug('Versions: ', versions);
+    .then(response => {
+      const versions = response.data.versions;
+      //logger.debug('Versions: ', versions);
 
-      if (versions.length > 0) {
-        versions.forEach(version => {
-          createMilestone(project, version);
-        });
+      const milestoneRequests =[];
+      // if (versions.length > 0) {
+      versions.forEach(version => {
+        milestoneRequests.push(createMilestone(project, version));
+      });
+      // }
+      // for (let i = 1; i <= versions.length; i++) {
+      //   milestoneRequests.push(createMilestone(project, versions[i]));
+      // };
+
+      if (milestoneRequests.length < 1) {
+        createIssues(project);
+      } else {
+        // Create all GitLab Milestones in parallel.
+        axios.all([...milestoneRequests])
+          .then(axios.spread((...milestones) => {
+            milestones.forEach(milestone => {
+              gitlabMilestones.push(milestone.data);
+            });
+            logger.info('Successfully created Gitlab Milestones');
+
+            versions.forEach(version => {
+              if (version.status === 'closed') {
+                const mile = getMilestone(version);
+                closeMilestone(project, mile);
+              }
+            });
+    
+            createIssues(project);
+          }))
+          .catch(error => {
+            logger.error(`Error getting milestone data for ${project.name}: `, error);
+          });
       }
+
+      // if (versions.length > 0) {
+      //   versions.forEach(version => {
+      //     createMilestone(project, version);
+      //   });
+      // }
+
+      // createIssues(project);
     })
-    .catch(e => {
-      logger.error(`Error getting milestone data for ${project.name}: `, e);
+    .catch(err => {
+      logger.error(`Error getting milestone data for ${project.name}: `, err);
     });
 };
 
+/**
+ * Get the Redmine Project details.
+ */
 const getProject = () => {
   const projectName = CONFIG.gitlab.project.substr(CONFIG.gitlab.project.lastIndexOf('/') + 1);
-   logger.debug(`PROJECT: ${projectName}`);
   gitlabService.get(`/api/v4/projects?search=${projectName}&simple=true`,
       gitlabConfig)
     .then(response => {
       const projects = response.data;
-      // logger.debug('Retreived GitLab Projects: ', projects);
+      //logger.debug('Retreived GitLab Projects: ', projects.length);
 
       projects.forEach(proj => {
-        logger.debug('Project: ', proj.path_with_namespace, ', Config Project: ', CONFIG.gitlab.project);
+        // Get the project we have specified in config at top of file.
         if (proj.path_with_namespace === CONFIG.gitlab.project) {
-          logger.debug('Creating Milestones for project: ', proj);
           createMilestones(proj);
-          logger.debug('Creating Issues for project: ', proj);
-          createIssues(proj);
         }
       }, this);
     })
@@ -354,8 +479,11 @@ const getProject = () => {
     });
 };
 
+/**
+ * Get the Redmine Issues for a page. A page consists of 100 issues, cannot get any more at one time.
+ */
 const getIssues = (page) => {
-  logger.debug(`URL: ${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`);
+  // logger.debug(`URL: ${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`);
   return redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig);
     // .then(res => {
     //   // logger.debug('RES: ', res);
@@ -368,22 +496,30 @@ const getIssues = (page) => {
     // });
 };
 
+/**
+ * Migrate a Redmine Project to GitLab.
+ */
 const migrate = () => {
-  gitlabService.get(`/api/v4/users`, gitlabConfig)
+  // Get the first 100 users, this is a limitation of the script, but it is
+  // difficult to know how many users there are so can't calculate how many
+  // pages required.
+  gitlabService.get(`/api/v4/users?per_page=100`, gitlabConfig)
     .then(response => {
       gitlabUsers = response.data;
 
       // getIssues();
       // getProject();
+
+      // Get total number of issues in the project, so we can calculate the number of pages required.
       let page = 1;
       redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig)
         .then(res => {
-          // TODO: WE KNOW NOW HOW MANY ISSUES, REPEAT, CALL getIssues function
+          // Calculate how many pages required.
           // concurrently e.g. axios.all([getIssues(1), getIssues(2), getIssues(3)...]).then(axios.spread(() => {...}));
-          redmineIssues = res.data.issues;
-          const total = res.data.total_count
+          // redmineIssues = res.data.issues;
+          const total = res.data.total_count;
           const pages = Math.ceil(total / 100);
-          logger.debug(`TOTAL PAGES: ${pages}`);
+          // logger.debug(`TOTAL PAGES: ${pages}`);
           // getIssues(pages);
 
           // for (let i = 1; i <= pages; i++) {
@@ -391,39 +527,40 @@ const migrate = () => {
           // };
 
 
+          // Get an array of function calls.
           const pagedRequests =[];
           for (let i = 1; i <= pages; i++) {
-           pagedRequests.push(getIssues(i));
+            pagedRequests.push(getIssues(i));
           };
 
-          // axios.all([getIssues(1), getIssues(2)])
+          // Get all Redmine Project Issues in parallel.
           axios.all([...pagedRequests])
           .then(axios.spread((...pages) => {
             for (let i = 0; i < pages.length; i++) {
-              // logger.debug('Paged issue count: ', page1.data.issues.length);
-              // logger.debug('Paged issue count: ', page2.data.issues.length);
-              // redmineIssues = [...page1.data.issues];
               redmineIssues = [...redmineIssues, ...pages[i].data.issues];
-              logger.debug('Retreived redmine Issues: ', redmineIssues.length);
             }
 
             getProject();
           }))
-          .catch(error => {
-            logger.error(`Error getting all Paged issues for ${CONFIG.redmine.project}: `, error);
+          .catch(ex => {
+            logger.error(`Error getting all Paged issues for ${CONFIG.redmine.project}: `, ex);
           });
           // logger.debug('Retreived redmine Issues: ', redmineIssues.length);
           // getProject();
         })
-        .catch(err => {
-          logger.error(`Error getting issues for ${CONFIG.redmine.project}: `, err);
+        .catch(error => {
+          logger.error(`Error getting issues for ${CONFIG.redmine.project}: `, error);
         });
     })
-    .catch(error => {
-      logger.error('Error getting list of users from GitLab: ', error);
+    .catch(err => {
+      logger.error('Error getting list of users from GitLab: ', err);
     });
 };
 
+/**
+ * Delete all issues in a Gitlab Project.
+ * This is really useful during development, shouldn't be used otherwise.
+ */
 const deleteIssues = (project) => {
   gitlabService.get(`/api/v4/projects/${project.id}/issues?per_page=100`, gitlabConfig)
     .then(response => {
@@ -443,6 +580,9 @@ const deleteIssues = (project) => {
     });
 };
 
+/**
+ * Get Projects to delete. (The name of this really needs to change).
+ */
 const deleteAllIssues = () => {
   const projectName = CONFIG.gitlab.project.substr(CONFIG.gitlab.project.lastIndexOf('/') + 1);
   logger.debug(`PROJECT: ${projectName}`);
@@ -465,6 +605,10 @@ const deleteAllIssues = () => {
     });
 };
 
+/**
+ * Take script argument and call the appropriate function, Display an error if no argument
+ * or not recognised.
+ */
 switch (process.argv[2]) {
   case 'migrate':
     migrate();
