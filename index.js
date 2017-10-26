@@ -185,12 +185,11 @@ const addAttachment = (id, iid, attachment) => {
  * @param issue: The Redmine Issue details.
  */
 const createIssue = (id, issue) => {
-  logger.debug('Issue: ', issue);
   const issueParams = {
     id: id,
-    title: issue.subject,
+    title: `RM#${issue.id} - ${issue.subject}`,
     description: issue.description,
-    created_at: issue.created_on,
+    created_at: issue.created_on
   };
 
   const userId = getUserId(issue);
