@@ -455,7 +455,7 @@ const createMilestones = (project) => {
 };
 
 /**
- * Get the Redmine Project details.
+ * Get the Redmine Project details. Once we have them, we can start creating GitLab Milestones.
  */
 const getProject = () => {
   const projectName = CONFIG.gitlab.project.substr(CONFIG.gitlab.project.lastIndexOf('/') + 1);
@@ -510,6 +510,7 @@ const migrate = () => {
           // Get all Redmine Project Issues in parallel.
           axios.all([...pagedRequests])
           .then(axios.spread((...pages) => {
+            // Combine all Redmine Project Issues into an array.
             for (let i = 0; i < pages.length; i++) {
               redmineIssues = [...redmineIssues, ...pages[i].data.issues];
             }
