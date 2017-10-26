@@ -369,18 +369,6 @@ const createMilestone = (project, version) => {
   return gitlabService.post(`/api/v4/projects/${project.id}/milestones`, 
                     milestoneParams, 
                     gitlabConfig);
-    // .then(response => {
-    //   const milestone = response.data;
-    //   logger.info('Successfully created milestone: ', milestone);
-    //   // logger.info('milestone : ', response.data);
-    //   // gitlabMilestones.push(response.data);
-    //   // if (version.status === 'closed') {
-    //   //   closeMilestone(project, milestone);
-    //   // }
-    // })
-    // .catch(err => {
-    //   logger.error('Error creating Milestone: ', err);
-    // });
 };
 
 /**
@@ -465,7 +453,6 @@ const getProject = () => {
       gitlabConfig)
     .then(response => {
       const projects = response.data;
-      //logger.debug('Retreived GitLab Projects: ', projects.length);
 
       projects.forEach(proj => {
         // Get the project we have specified in config at top of file.
@@ -483,17 +470,7 @@ const getProject = () => {
  * Get the Redmine Issues for a page. A page consists of 100 issues, cannot get any more at one time.
  */
 const getIssues = (page) => {
-  // logger.debug(`URL: ${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`);
   return redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig);
-    // .then(res => {
-    //   // logger.debug('RES: ', res);
-    //   const issues = res.data.issues;
-    //   logger.debug('PAGED ISSUES: ', issues.length);
-    //   redmineIssues = redmineIssues.concat(res.data.issues);
-    // })
-    // .catch(err => {
-    //   logger.error('Error getting Issues: ', err);
-    // });
 };
 
 /**
@@ -507,25 +484,13 @@ const migrate = () => {
     .then(response => {
       gitlabUsers = response.data;
 
-      // getIssues();
-      // getProject();
-
       // Get total number of issues in the project, so we can calculate the number of pages required.
       let page = 1;
       redmineService.get(`/${CONFIG.redmine.project}/issues.json?limit=100&status_id=*&page=${page}`, redmineConfig)
         .then(res => {
           // Calculate how many pages required.
-          // concurrently e.g. axios.all([getIssues(1), getIssues(2), getIssues(3)...]).then(axios.spread(() => {...}));
-          // redmineIssues = res.data.issues;
           const total = res.data.total_count;
           const pages = Math.ceil(total / 100);
-          // logger.debug(`TOTAL PAGES: ${pages}`);
-          // getIssues(pages);
-
-          // for (let i = 1; i <= pages; i++) {
-          //  getIssues(i);
-          // };
-
 
           // Get an array of function calls.
           const pagedRequests =[];
@@ -545,8 +510,6 @@ const migrate = () => {
           .catch(ex => {
             logger.error(`Error getting all Paged issues for ${CONFIG.redmine.project}: `, ex);
           });
-          // logger.debug('Retreived redmine Issues: ', redmineIssues.length);
-          // getProject();
         })
         .catch(error => {
           logger.error(`Error getting issues for ${CONFIG.redmine.project}: `, error);
