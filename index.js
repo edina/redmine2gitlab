@@ -320,7 +320,8 @@ const createIssues = (project) => {
         if (attachments.length > 0) {
           createAttachments(project, attachments);
         }
-        // createIssue(project.id, issue);
+
+        createIssue(project.id, issue);
       })
       .catch(err => {
         logger.error('Error getting issue data for: ', err);
@@ -385,6 +386,10 @@ const getMilestone = (version) => {
   }
 };
 
+const getMilestones = (group, page) => {
+  return gitlabService.get(`/api/v4/groups/${group.id}/milestones?per_page=100&page=${page}`, gitlabConfig)
+};
+
 /**
  * Create Gitlab Milestones.
  * 
@@ -396,60 +401,67 @@ const createMilestones = (project) => {
   redmineService.get(`/projects/${projectName}/versions.json`, redmineConfig)
     .then(response => {
       const versions = response.data.versions;
-      logger.debug('Versions: ', versions);
       const group = project.namespace;
-      // Get group milestones to check if it already exists.
-      gitlabService.get(`/api/v4/groups/${group.id}/milestones`, gitlabConfig)
-        .then(res => {
-          const groupMilestones = res.data;
-          logger.debug('Group Milestones: ', res.data);
-          const milestoneRequests =[];
+      const milestoneRequests = [];
+      for (let i = 1; i < 6; i++) {
+        milestoneRequests.push(getMilestones(group, i));
+      }
 
-          versions.forEach(version => {
-            let milestoneExists = false;
-            for (let i = 0; i < groupMilestones.length; i++) {
-              logger.debug(`Milestone Title: ${groupMilestones[i].title}, Version Name: ${version.name}`);
-              if (groupMilestones[i].title === version.name) {
-                milestoneExists = true;
-                break;
-              }
-            }
-            
-            if (!milestoneExists) {
-              milestoneRequests.push(createMilestone(group, version));
-            }            
-          });
-
-          if (milestoneRequests.length < 1) {
-            createIssues(project);
-          } else {
-            // Create all GitLab Milestones in parallel.
-            logger.debug(`Number of Milestones: ${milestoneRequests.length}`);
-            // Create all GitLab Milestones in parallel.
-            axios.all([...milestoneRequests])
-              .then(axios.spread((...milestones) => {
-                milestones.forEach(milestone => {
-                  gitlabMilestones.push(milestone.data);
-                });
-                logger.info('Successfully created Gitlab Milestones');
-
-                versions.forEach(version => {
-                  if (version.status === 'closed') {
-                    const mile = getMilestone(version);
-                    closeMilestone(project, mile);
-                  }
-                });
-                
-                createIssues(project);
-              }))
-              .catch(error => {
-                logger.error(`Error getting milestone data for ${project.name}: `, error);
-              });
-          }
-        })
-        .catch(error => {
-          logger.error(`Error getting GitLab Milestone data for ${project.namespace.id}: `, error);
+      // CGet all GitLab Milestones in parallel.
+      axios.all([...milestoneRequests]).then(axios.spread((...milestones) => {
+        let groupMilestones = [];
+        milestones.forEach(milestone => {
+          gitlabMilestones = [...gitlabMilestones, ...milestone.data];
         });
+        logger.info('Successfully retrieved Gitlab Milestones: ', groupMilestones.length);
+
+        const createMilestoneRequests = [];
+        versions.forEach(version => {
+          let milestoneExists = false;
+          for (let i = 0; i < gitlabMilestones.length; i++) {
+            if (gitlabMilestones[i].title === version.name) {
+              milestoneExists = true;
+              break;
+            }
+          }
+
+          if (!milestoneExists) {
+            createMilestoneRequests.push(createMilestone(group, version));
+          }
+        });
+
+        if (createMilestoneRequests.length === 0) {
+          createIssues(project);
+        } else {
+          // Create all GitLab Milestones in parallel.
+          logger.info(`Number of Milestones to create: ${createMilestoneRequests.length}`);
+          // Create all GitLab Milestones in parallel.
+          axios.all([...createMilestoneRequests])
+            .then(axios.spread((...milestones) => {
+              milestones.forEach(milestone => {
+                gitlabMilestones.push(milestone.data);
+              });
+
+              logger.debug('Versions length: ', versions.length);
+              versions.forEach(version => {
+                if (version.status === 'closed') {
+                  const mile = getMilestone(version);
+                  closeMilestone(group, mile);
+                }
+              });
+
+              logger.info('Successfully created Gitlab Milestones');
+
+              createIssues(project);
+            }))
+            .catch(error => {
+              logger.error(`Error getting milestone data for ${group.name}: `, error);
+            });
+        }
+      }))
+      .catch(error => {
+        logger.error(`Error getting milestone data for ${group.name}: `, error);
+      });
     })
     .catch(err => {
       logger.error(`Error getting Redmine Version data for ${project.namespace.id}: `, err);
