@@ -13,7 +13,7 @@
     "log4js": "^2.3.3"
   },
   "scripts": {
-    "start": "node index.js migrate >migration.log 2>&1",
+    "start": "mkdir -p tmp && node index.js migrate >migration.log 2>&1",
     "delete": "node index.js delete >delete.log 2>&1"
   }
 }

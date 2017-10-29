@@ -249,7 +249,7 @@ const createIssue = (id, issue) => {
  * @param attachement Redmine Issue attachment details.
  */
 const uploadAttachment = (project, attachment) => {
-  const stream = fs.createReadStream(__dirname + '/' + attachment.filename);
+  const stream = fs.createReadStream(__dirname + '/tmp/' + attachment.filename);
   const fd = new FormData();
   fd.append("id", project.id);
   fd.append("file", stream);
@@ -293,7 +293,7 @@ const createAttachments = (project, attachments) => {
     })
       .then(response => {
         // Write file to filesystem.
-        response.data.pipe(fs.createWriteStream(attachment.filename));
+        response.data.pipe(fs.createWriteStream('tmp/' + attachment.filename));
         uploadAttachment(project, attachment);
       })
       .catch(err => {
