@@ -10,14 +10,18 @@ logger.level = 'trace';
 
 const CONFIG = {
   redmine: {
-    base: 'HOSTNAME',
-    project: 'PROJECT',
-    key: 'KEY'
+    base: 'https://redmine.edina.ac.uk',
+    // project: 'projects/agcensus',
+    project: 'projects/keepsafe',
+    key: '1005d848f5a4340eba475aeb1ce3bcd7127157a7'
   },
   gitlab: {
-    base: 'HOSTNAME',
-    project: 'PROJECT',
-    key: 'KEY'
+    base: 'https://gitlab-tmp.edina.ac.uk',
+    // project: 'testing/migration/agcensus/agcensus',
+    project: 'testing/migration/keepsafe/keepsafe-dev',
+    // key: '4PkkCbtT3wxmtJzd994z',
+    key: 'rn35gKEgG8T5UiCKazyx'
+  }
 };
 
 const redmineConfig = {
@@ -147,7 +151,6 @@ const getUserId = (issue) => {
 const getMilestoneId = (issue) => {
   if (issue.fixed_version) {
     for (let i = 0; i < gitlabMilestones.length; i++) {
-      //logger.debug('Milestone: ', gitlabMilestones[i].title, ', issue Milestone: ', issue.fixed_version.name);
       if (gitlabMilestones[i].title === issue.fixed_version.name) {
         return gitlabMilestones[i].id;
       }
@@ -194,13 +197,11 @@ const createIssue = (id, issue) => {
 
   const userId = getUserId(issue);
   if (userId) {
-    logger.debug(`Assigning User ID: ${userId}`);
     issueParams['assignee_ids'] = [userId];
   }
 
   const milestoneId = getMilestoneId(issue);
   if (milestoneId) {
-    logger.debug(`Assigning Milestone ID: ${milestoneId}`);
     issueParams['milestone_id'] = milestoneId;
   }
 
@@ -212,9 +213,9 @@ const createIssue = (id, issue) => {
       const journals = issue.journals;
       const attachments = issue.attachments;
 
-      // Add notes to issue.
       journals.forEach(journal => {
         if (journal.notes && journal.notes.length > 0) {
+          // Add a note to the issue.
           addNote(id, createIssueResponse.iid, journal);
         }
       });
@@ -307,6 +308,7 @@ const createAttachments = (project, attachments) => {
  * @param project The project to create issues for.
  */
 const createIssues = (project) => {
+  logger.info('Creating issues for project: ', project.name);
   // Create issues in GitLab.
   redmineIssues.forEach(issue => {
     // Get info for each issue, including notes and attachments.
@@ -318,7 +320,7 @@ const createIssues = (project) => {
         if (attachments.length > 0) {
           createAttachments(project, attachments);
         }
-        createIssue(project.id, issue);
+        // createIssue(project.id, issue);
       })
       .catch(err => {
         logger.error('Error getting issue data for: ', err);
@@ -357,7 +359,7 @@ const closeMilestone = (group, milestone) => {
  * @param version The Redmine 'Targeted Version' details.
  */
 const createMilestone = (group, version) => {
-  logger.debug(`Group: ${group.name} - Version ${version.name}`);
+  logger.info(`Creating Group Milestone: ${version.name}`);
   const milestoneParams = {
     id: group.id,
     title: version.name,
