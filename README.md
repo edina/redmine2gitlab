@@ -8,7 +8,7 @@ Migrate Redmine issues to a GitHub project.
 
 ## Setup
 
-To install dependencies used by the script, run `yarn install`.
+To install dependencies used by the script, run `yarn setup`.
 
 ## Migration Steps
 
