@@ -112,7 +112,7 @@ const closeIssue = (state, id, iid) => {
  */
 const addNote = (id, iid, journal) => {
   const updateIssueParams = {
-    body: journal.notes,
+    body: `**${journal.user.name} -** ${journal.notes}`,
     created_at: journal.created_on
   };
 
